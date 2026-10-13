@@ -58,38 +58,56 @@ class TradingApp:
 
     @log_action("REGISTER")
     def register(self, username: str, password: str) -> User:
-        """Register a unique user and create their empty portfolio."""
+        """Register a unique user and create a matching empty portfolio.
+
+        Read both stores before writing either. If the second save fails,
+        restore the original users file as a compensating rollback.
+        """
         if not isinstance(username, str) or not username.strip():
             raise UseCaseError("Пустое имя пользователя")
 
         username = username.strip()
-        users = self._db.load_users()
-        if any(
-            str(item.get("username", "")).casefold() == username.casefold()
-            for item in users
-        ):
-            raise UseCaseError(f"Имя '{username}' уже занято")
+        with self._db.transaction():
+            users = self._db.load_users()
+            portfolios = self._db.load_portfolios()
+            if any(
+                str(item.get("username", "")).casefold() == username.casefold()
+                for item in users
+            ):
+                raise UseCaseError(f"Имя '{username}' уже занято")
 
-        user_id = max((int(item["user_id"]) for item in users), default=0) + 1
-        try:
-            user = User.create(user_id, username, password)
-        except (TypeError, ValueError) as exc:
-            raise UseCaseError("Пароль должен быть не короче 4 символов") from exc
+            user_id = max((int(item["user_id"]) for item in users), default=0) + 1
+            try:
+                user = User.create(user_id, username, password)
+            except (TypeError, ValueError) as exc:
+                raise UseCaseError("Пароль должен быть не короче 4 символов") from exc
 
-        portfolios = self._db.load_portfolios()
-        users.append(
-            {
-                "user_id": user.user_id,
-                "username": user.username,
-                "hashed_password": user.hashed_password,
-                "salt": user.salt,
-                "registration_date": user.registration_date.isoformat(),
-            }
-        )
-        portfolios.append({"user_id": user.user_id, "wallets": {}})
-        self._db.save_users(users)
-        self._db.save_portfolios(portfolios)
-        return user
+            original_users = users.copy()
+            users.append(
+                {
+                    "user_id": user.user_id,
+                    "username": user.username,
+                    "hashed_password": user.hashed_password,
+                    "salt": user.salt,
+                    "registration_date": user.registration_date.isoformat(),
+                }
+            )
+            portfolios.append({"user_id": user.user_id, "wallets": {}})
+
+            self._db.save_users(users)
+            try:
+                self._db.save_portfolios(portfolios)
+            except StorageError as exc:
+                try:
+                    self._db.save_users(original_users)
+                except StorageError as rollback_exc:
+                    raise StorageError(
+                        "Регистрация прервана: не удалось восстановить users.json "
+                        f"после ошибки сохранения portfolios.json: {rollback_exc}"
+                    ) from exc
+                raise
+
+            return user
 
     @log_action("LOGIN")
     def login(self, username: str, password: str) -> User:
@@ -129,50 +147,56 @@ class TradingApp:
 
     @log_action("BUY", verbose=True)
     def buy(self, currency_code: str, amount: float) -> TradeResult:
-        """Credit purchased units without debiting USD (section 2.2)."""
+        """Credit currency units, saving the wallet only after success."""
         user = self._require_login()
         code = get_currency(currency_code).code
         amount = self._positive_amount(amount)
+        # Never create an empty wallet if the requested rate is unavailable.
         quote = self._rates.get_rate(code, "USD")
-        portfolio = self._load_portfolio(user)
 
-        try:
-            wallet = portfolio.get_wallet(code)
-        except KeyError:
-            wallet = portfolio.add_currency(code)
+        with self._db.transaction():
+            records = self._db.load_portfolios()
+            portfolio = self._load_portfolio(user, records)
+            try:
+                wallet = portfolio.get_wallet(code)
+            except KeyError:
+                wallet = portfolio.add_currency(code)
 
-        before = wallet.balance
-        wallet.deposit(amount)
-        self._save_portfolio(portfolio)
-        return TradeResult(
-            code, amount, before, wallet.balance, quote.rate, amount * quote.rate
-        )
+            before = wallet.balance
+            wallet.deposit(amount)
+            self._save_portfolio(portfolio, records)
+            return TradeResult(
+                code, amount, before, wallet.balance, quote.rate, amount * quote.rate
+            )
 
     @log_action("SELL", verbose=True)
     def sell(self, currency_code: str, amount: float) -> TradeResult:
-        """Deduct units without crediting USD (section 2.2)."""
+        """Withdraw currency units, rejecting missing or insufficient funds."""
         user = self._require_login()
         code = get_currency(currency_code).code
         amount = self._positive_amount(amount)
-        portfolio = self._load_portfolio(user)
 
-        try:
-            wallet = portfolio.get_wallet(code)
-        except KeyError as exc:
-            raise UseCaseError(
-                f"У вас нет кошелька '{code}'. Он создаётся при первой покупке."
-            ) from exc
+        with self._db.transaction():
+            records = self._db.load_portfolios()
+            portfolio = self._load_portfolio(user, records)
+            try:
+                wallet = portfolio.get_wallet(code)
+            except KeyError as exc:
+                raise UseCaseError(
+                    f"У вас нет кошелька '{code}'. Он создаётся при первой покупке."
+                ) from exc
 
-        if wallet.balance < amount:
-            raise InsufficientFundsError(wallet.balance, amount, code)
+            if wallet.balance < amount:
+                raise InsufficientFundsError(wallet.balance, amount, code)
 
-        quote = self._rates.get_rate(code, "USD")
-        before = wallet.balance
-        wallet.withdraw(amount)
-        self._save_portfolio(portfolio)
-        return TradeResult(
-            code, amount, before, wallet.balance, quote.rate, amount * quote.rate
-        )
+            # Obtain the price before changing any balance.
+            quote = self._rates.get_rate(code, "USD")
+            before = wallet.balance
+            wallet.withdraw(amount)
+            self._save_portfolio(portfolio, records)
+            return TradeResult(
+                code, amount, before, wallet.balance, quote.rate, amount * quote.rate
+            )
 
     @log_action("GET_RATE")
     def get_rate(self, from_currency: str, to_currency: str) -> RateQuote:
@@ -206,14 +230,14 @@ class TradingApp:
         except (TypeError, ValueError) as exc:
             raise UseCaseError("'amount' должен быть положительным числом") from exc
 
-    def _load_portfolio(self, user: User) -> Portfolio:
+    def _load_portfolio(
+        self, user: User, records: list[dict] | None = None
+    ) -> Portfolio:
+        """Deserialize a user's wallet collection from loaded JSON records."""
+        if records is None:
+            records = self._db.load_portfolios()
         record = next(
-            (
-                row
-                for row in self._db.load_portfolios()
-                if row.get("user_id") == user.user_id
-            ),
-            None,
+            (row for row in records if row.get("user_id") == user.user_id), None
         )
         if record is None:
             return Portfolio(user)
@@ -226,8 +250,12 @@ class TradingApp:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             raise StorageError("Некорректный портфель в portfolios.json") from exc
 
-    def _save_portfolio(self, portfolio: Portfolio) -> None:
-        portfolios = self._db.load_portfolios()
+    def _save_portfolio(
+        self, portfolio: Portfolio, records: list[dict] | None = None
+    ) -> None:
+        """Replace a user's record and persist all portfolios together."""
+        if records is None:
+            records = self._db.load_portfolios()
         new_record = {
             "user_id": portfolio.user_id,
             "wallets": {
@@ -235,10 +263,10 @@ class TradingApp:
                 for code, wallet in portfolio.wallets.items()
             },
         }
-        for index, record in enumerate(portfolios):
+        for index, record in enumerate(records):
             if record.get("user_id") == portfolio.user_id:
-                portfolios[index] = new_record
+                records[index] = new_record
                 break
         else:
-            portfolios.append(new_record)
-        self._db.save_portfolios(portfolios)
+            records.append(new_record)
+        self._db.save_portfolios(records)

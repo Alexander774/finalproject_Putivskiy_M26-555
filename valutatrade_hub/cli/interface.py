@@ -18,7 +18,10 @@ from valutatrade_hub.logging_config import configure_logging
 
 def _build_parser() -> argparse.ArgumentParser:
     """Describe supported commands and their arguments."""
-    parser = argparse.ArgumentParser(prog="valutatrade")
+    parser = argparse.ArgumentParser(
+        prog="valutatrade",
+        description="Виртуальная торговля валютами (демонстрационные курсы).",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     register = commands.add_parser("register", help="Зарегистрироваться")
@@ -37,7 +40,11 @@ def _build_parser() -> argparse.ArgumentParser:
         trade.add_argument("--currency", required=True)
         trade.add_argument("--amount", required=True, type=float)
 
-    rate = commands.add_parser("get-rate", help="Показать курс")
+    rate = commands.add_parser(
+        "get-rate",
+        help="Показать курс",
+        description="Курс берётся из кеша или демонстрационного сервиса.",
+    )
     rate.add_argument("--from", dest="from_currency", required=True)
     rate.add_argument("--to", dest="to_currency", required=True)
     return parser
@@ -107,6 +114,22 @@ def _execute(args: argparse.Namespace, app: TradingApp) -> None:
         print("Источник: кеш или демонстрационные курсы (не рыночные данные)")
 
 
+def _print_command_error(error: Exception) -> None:
+    """Present domain and infrastructure errors without leaking tracebacks."""
+    if isinstance(error, InsufficientFundsError):
+        print(error)
+    elif isinstance(error, CurrencyNotFoundError):
+        print(f"{error}. Поддерживаемые коды: {', '.join(get_supported_codes())}.")
+        print("Справка: help get-rate")
+    elif isinstance(error, ApiRequestError):
+        print(f"{error}. Повторите попытку позже или проверьте сеть.")
+    elif isinstance(error, UseCaseError):
+        # The use case already contains a complete user-facing message.
+        print(error)
+    else:
+        print(f"Ошибка: {error}")
+
+
 def main() -> None:
     """Run the persistent interactive command loop."""
     parser = _build_parser()
@@ -154,12 +177,13 @@ def main() -> None:
         except SystemExit:
             # argparse uses SystemExit for --help and invalid arguments.
             continue
-        except InsufficientFundsError as exc:
-            print(exc)
-        except CurrencyNotFoundError as exc:
-            print(f"{exc}. Поддерживаемые коды: {', '.join(get_supported_codes())}.")
-            print("Справка: help get-rate")
-        except ApiRequestError as exc:
-            print(f"{exc}. Повторите попытку позже или проверьте сеть.")
-        except (UseCaseError, StorageError, ValueError, TypeError) as exc:
-            print(f"Ошибка: {exc}")
+        except (
+            InsufficientFundsError,
+            CurrencyNotFoundError,
+            ApiRequestError,
+            UseCaseError,
+            StorageError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            _print_command_error(exc)
