@@ -258,7 +258,7 @@ class Portfolio:
 
     @property
     def wallets(self) -> dict[str, Wallet]:
-        """Return a shallow copy of the wallets dictionary."""
+        """Return a shallow copy of the wallet dictionary."""
         return self._wallets.copy()
 
     def add_currency(self, currency_code: str) -> Wallet:
