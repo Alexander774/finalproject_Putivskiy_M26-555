@@ -3,25 +3,13 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from valutatrade_hub.core.models import (
-    Portfolio,
-    User,
-    Wallet,
-    _validate_currency_code,
-    _validate_number,
-)
-from valutatrade_hub.infra.storage import (
-    StorageError,
-    load_portfolios,
-    load_users,
-    save_portfolios,
-    save_users,
-)
-from valutatrade_hub.parser_service.parser import (
-    RateQuote,
-    RateService,
-    RateUnavailableError,
-)
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import InsufficientFundsError
+from valutatrade_hub.core.models import Portfolio, User, Wallet, _validate_number
+from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import DatabaseManager, StorageError
+from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.parser_service.parser import RateQuote, RateService
 
 
 class UseCaseError(Exception):
@@ -64,15 +52,18 @@ class TradingApp:
 
     def __init__(self, rate_service: RateService | None = None) -> None:
         self._current_user: User | None = None
-        self._rates = rate_service or RateService()
+        self._settings = SettingsLoader()
+        self._db = DatabaseManager()
+        self._rates = rate_service if rate_service is not None else RateService()
 
+    @log_action("REGISTER")
     def register(self, username: str, password: str) -> User:
         """Register a unique user and create their empty portfolio."""
         if not isinstance(username, str) or not username.strip():
             raise UseCaseError("Пустое имя пользователя")
 
         username = username.strip()
-        users = load_users()
+        users = self._db.load_users()
         if any(
             str(item.get("username", "")).casefold() == username.casefold()
             for item in users
@@ -85,7 +76,7 @@ class TradingApp:
         except (TypeError, ValueError) as exc:
             raise UseCaseError("Пароль должен быть не короче 4 символов") from exc
 
-        portfolios = load_portfolios()
+        portfolios = self._db.load_portfolios()
         users.append(
             {
                 "user_id": user.user_id,
@@ -96,13 +87,14 @@ class TradingApp:
             }
         )
         portfolios.append({"user_id": user.user_id, "wallets": {}})
-        save_users(users)
-        save_portfolios(portfolios)
+        self._db.save_users(users)
+        self._db.save_portfolios(portfolios)
         return user
 
+    @log_action("LOGIN")
     def login(self, username: str, password: str) -> User:
         """Authenticate the user for the lifetime of the CLI process."""
-        users = load_users()
+        users = self._db.load_users()
         record = next((row for row in users if row.get("username") == username), None)
         if record is None:
             raise UseCaseError(f"Пользователь '{username}' не найден")
@@ -114,24 +106,19 @@ class TradingApp:
         self._current_user = user
         return user
 
-    def show_portfolio(self, base_currency: str = "USD") -> PortfolioSummary:
+    def show_portfolio(self, base_currency: str | None = None) -> PortfolioSummary:
         """Return every balance and its total value in base currency."""
         user = self._require_login()
-        base = _validate_currency_code(base_currency)
+        base = get_currency(
+            base_currency or self._settings.get("default_base_currency")
+        ).code
         portfolio = self._load_portfolio(user)
-
-        try:
-            base_usd = self._rates.get_rate(base, "USD").rate
-        except RateUnavailableError as exc:
-            raise UseCaseError(f"Неизвестная базовая валюта '{base}'") from exc
+        base_usd = self._rates.get_rate(base, "USD").rate
 
         rates_usd = {base: base_usd}
         rows: list[PortfolioRow] = []
         for code, wallet in sorted(portfolio.wallets.items()):
-            try:
-                usd_rate = self._rates.get_rate(code, "USD").rate
-            except RateUnavailableError as exc:
-                raise UseCaseError(f"Нет курса для валюты '{code}'") from exc
+            usd_rate = self._rates.get_rate(code, "USD").rate
             rates_usd[code] = usd_rate
             rows.append(
                 PortfolioRow(code, wallet.balance, wallet.balance * usd_rate / base_usd)
@@ -140,12 +127,13 @@ class TradingApp:
         total = portfolio.get_total_value(base, exchange_rates=rates_usd)
         return PortfolioSummary(user.username, base, rows, total)
 
+    @log_action("BUY", verbose=True)
     def buy(self, currency_code: str, amount: float) -> TradeResult:
         """Credit purchased units without debiting USD (section 2.2)."""
         user = self._require_login()
-        code = _validate_currency_code(currency_code)
+        code = get_currency(currency_code).code
         amount = self._positive_amount(amount)
-        quote = self._usd_quote(code)
+        quote = self._rates.get_rate(code, "USD")
         portfolio = self._load_portfolio(user)
 
         try:
@@ -160,10 +148,11 @@ class TradingApp:
             code, amount, before, wallet.balance, quote.rate, amount * quote.rate
         )
 
+    @log_action("SELL", verbose=True)
     def sell(self, currency_code: str, amount: float) -> TradeResult:
         """Deduct units without crediting USD (section 2.2)."""
         user = self._require_login()
-        code = _validate_currency_code(currency_code)
+        code = get_currency(currency_code).code
         amount = self._positive_amount(amount)
         portfolio = self._load_portfolio(user)
 
@@ -175,12 +164,9 @@ class TradingApp:
             ) from exc
 
         if wallet.balance < amount:
-            raise UseCaseError(
-                f"Недостаточно средств: {wallet.balance:.8f} {code} доступно; "
-                f"требуется {amount:.8f} {code}"
-            )
+            raise InsufficientFundsError(wallet.balance, amount, code)
 
-        quote = self._usd_quote(code)
+        quote = self._rates.get_rate(code, "USD")
         before = wallet.balance
         wallet.withdraw(amount)
         self._save_portfolio(portfolio)
@@ -188,16 +174,12 @@ class TradingApp:
             code, amount, before, wallet.balance, quote.rate, amount * quote.rate
         )
 
+    @log_action("GET_RATE")
     def get_rate(self, from_currency: str, to_currency: str) -> RateQuote:
         """Get a cross-rate, without requiring authentication."""
-        source = _validate_currency_code(from_currency)
-        target = _validate_currency_code(to_currency)
-        try:
-            return self._rates.get_rate(source, target)
-        except RateUnavailableError as exc:
-            raise UseCaseError(
-                f"Курс {source}→{target} недоступен. Повторите попытку позже."
-            ) from exc
+        source = get_currency(from_currency).code
+        target = get_currency(to_currency).code
+        return self._rates.get_rate(source, target)
 
     @staticmethod
     def _decode_user(record: dict) -> User:
@@ -224,17 +206,13 @@ class TradingApp:
         except (TypeError, ValueError) as exc:
             raise UseCaseError("'amount' должен быть положительным числом") from exc
 
-    def _usd_quote(self, currency_code: str) -> RateQuote:
-        try:
-            return self._rates.get_rate(currency_code, "USD")
-        except RateUnavailableError as exc:
-            raise UseCaseError(
-                f"Не удалось получить курс для {currency_code}→USD"
-            ) from exc
-
     def _load_portfolio(self, user: User) -> Portfolio:
         record = next(
-            (row for row in load_portfolios() if row.get("user_id") == user.user_id),
+            (
+                row
+                for row in self._db.load_portfolios()
+                if row.get("user_id") == user.user_id
+            ),
             None,
         )
         if record is None:
@@ -248,9 +226,8 @@ class TradingApp:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             raise StorageError("Некорректный портфель в portfolios.json") from exc
 
-    @staticmethod
-    def _save_portfolio(portfolio: Portfolio) -> None:
-        portfolios = load_portfolios()
+    def _save_portfolio(self, portfolio: Portfolio) -> None:
+        portfolios = self._db.load_portfolios()
         new_record = {
             "user_id": portfolio.user_id,
             "wallets": {
@@ -264,4 +241,4 @@ class TradingApp:
                 break
         else:
             portfolios.append(new_record)
-        save_portfolios(portfolios)
+        self._db.save_portfolios(portfolios)

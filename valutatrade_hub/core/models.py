@@ -7,6 +7,8 @@ import secrets
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
+from valutatrade_hub.core.exceptions import InsufficientFundsError
+
 # Temporary illustrative rates: value of one unit in USD.
 # Actual rates will later come from the parser service.
 DEMO_RATES_USD: dict[str, float] = {
@@ -157,7 +159,6 @@ class User:
     def change_password(self, new_password: str) -> None:
         """Replace the password hash and generate a new salt."""
         self._validate_password(new_password)
-
         self._salt = secrets.token_hex(16)
         self._hashed_password = self._hash_password(new_password, self._salt)
 
@@ -167,7 +168,6 @@ class User:
             raise TypeError("Password must be a string")
 
         candidate = self._hash_password(password, self._salt)
-
         return hmac.compare_digest(candidate, self._hashed_password)
 
 
@@ -197,11 +197,11 @@ class Wallet:
         self.balance += amount
 
     def withdraw(self, amount: float) -> None:
-        """Withdraw a positive amount if sufficient funds exist."""
+        """Withdraw a positive amount or raise InsufficientFundsError."""
         amount = _validate_number(amount, positive=True)
 
         if amount > self.balance:
-            raise ValueError("Insufficient funds")
+            raise InsufficientFundsError(self.balance, amount, self.currency_code)
 
         self.balance -= amount
 
@@ -258,7 +258,7 @@ class Portfolio:
 
     @property
     def wallets(self) -> dict[str, Wallet]:
-        """Return a shallow copy of the wallet dictionary."""
+        """Return a shallow copy of the wallets dictionary."""
         return self._wallets.copy()
 
     def add_currency(self, currency_code: str) -> Wallet:

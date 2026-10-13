@@ -4,8 +4,9 @@ __pycache__/
 
 .venv/
 
+data/
 dist/
-build/
+logs/
 
 .idea/
 .vscode/

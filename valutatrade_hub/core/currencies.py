@@ -53,10 +53,7 @@ class FiatCurrency(Currency):
 
     def get_display_info(self) -> str:
         """Return fiat-currency information in the required format."""
-        return (
-            f"[FIAT] {self.code} — {self.name} "
-            f"(Issuing: {self.issuing_country})"
-        )
+        return f"[FIAT] {self.code} — {self.name} (Issuing: {self.issuing_country})"
 
 
 class CryptoCurrency(Currency):
@@ -81,8 +78,7 @@ class CryptoCurrency(Currency):
         """Return cryptocurrency information with a compact market cap."""
         cap = f"{self.market_cap:.2e}".replace("e+", "e")
         return (
-            f"[CRYPTO] {self.code} — {self.name} "
-            f"(Algo: {self.algorithm}, MCAP: {cap})"
+            f"[CRYPTO] {self.code} — {self.name} (Algo: {self.algorithm}, MCAP: {cap})"
         )
 
 
@@ -112,4 +108,9 @@ def get_currency(code: str) -> Currency:
         name, algorithm, market_cap = _CRYPTO_CURRENCIES[normalized]
         return CryptoCurrency(name, normalized, algorithm, market_cap)
 
-    raise CurrencyNotFoundError(f"Unknown currency: {normalized}")
+    raise CurrencyNotFoundError(normalized)
+
+
+def get_supported_codes() -> tuple[str, ...]:
+    """Return all currency codes supported by the built-in registry."""
+    return tuple(sorted(_FIAT_CURRENCIES.keys() | _CRYPTO_CURRENCIES.keys()))

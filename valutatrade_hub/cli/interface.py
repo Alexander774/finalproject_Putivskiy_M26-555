@@ -5,8 +5,15 @@ import shlex
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import get_supported_codes
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.usecases import TradingApp, UseCaseError
-from valutatrade_hub.infra.storage import StorageError
+from valutatrade_hub.infra.database import StorageError
+from valutatrade_hub.logging_config import configure_logging
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,7 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     login.add_argument("--password", required=True)
 
     portfolio = commands.add_parser("show-portfolio", help="Показать портфель")
-    portfolio.add_argument("--base", default="USD")
+    portfolio.add_argument("--base", default=None)
 
     for command in ("buy", "sell"):
         trade = commands.add_parser(command, help=f"Операция {command}")
@@ -103,6 +110,7 @@ def _execute(args: argparse.Namespace, app: TradingApp) -> None:
 def main() -> None:
     """Run the persistent interactive command loop."""
     parser = _build_parser()
+    configure_logging()
     app = TradingApp()
     print("ValutaTrade Hub. Введите help для команд, exit для выхода.")
 
@@ -121,6 +129,24 @@ def main() -> None:
         if command_line.lower() == "help":
             parser.print_help()
             continue
+        if command_line.lower().startswith("help "):
+            name = command_line.split(maxsplit=1)[1].strip()
+            commands = {
+                "register",
+                "login",
+                "buy",
+                "sell",
+                "show-portfolio",
+                "get-rate",
+            }
+            if name in commands:
+                try:
+                    parser.parse_args([name, "--help"])
+                except SystemExit:
+                    pass
+            else:
+                print(f"Неизвестная команда: {name}")
+            continue
 
         try:
             args = parser.parse_args(shlex.split(command_line))
@@ -128,5 +154,12 @@ def main() -> None:
         except SystemExit:
             # argparse uses SystemExit for --help and invalid arguments.
             continue
+        except InsufficientFundsError as exc:
+            print(exc)
+        except CurrencyNotFoundError as exc:
+            print(f"{exc}. Поддерживаемые коды: {', '.join(get_supported_codes())}.")
+            print("Справка: help get-rate")
+        except ApiRequestError as exc:
+            print(f"{exc}. Повторите попытку позже или проверьте сеть.")
         except (UseCaseError, StorageError, ValueError, TypeError) as exc:
             print(f"Ошибка: {exc}")
