@@ -1,5 +1,6 @@
 """Application operations, independent of terminal input and output."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -9,7 +10,14 @@ from valutatrade_hub.core.models import Portfolio, User, Wallet, _validate_numbe
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager, StorageError
 from valutatrade_hub.infra.settings import SettingsLoader
-from valutatrade_hub.parser_service.parser import RateQuote, RateService
+from valutatrade_hub.parser_service.api_clients import (
+    CoinGeckoClient,
+    ExchangeRateApiClient,
+)
+from valutatrade_hub.parser_service.config import ParserConfig
+from valutatrade_hub.parser_service.parser import RateQuote, RateService, RatesTable
+from valutatrade_hub.parser_service.storage import RatesStorage
+from valutatrade_hub.parser_service.updater import RatesUpdater, UpdateResult
 
 
 class UseCaseError(Exception):
@@ -204,6 +212,39 @@ class TradingApp:
         source = get_currency(from_currency).code
         target = get_currency(to_currency).code
         return self._rates.get_rate(source, target)
+
+    def update_rates(
+        self,
+        source: str | None = None,
+        *,
+        progress_callback: Callable[[str, str], None] | None = None,
+    ) -> UpdateResult:
+        """Refresh all or a selected provider without requiring login."""
+        if source not in {None, "coingecko", "exchangerate"}:
+            raise UseCaseError("Источник должен быть coingecko или exchangerate")
+        config = ParserConfig()
+        clients = []
+        if source in {None, "coingecko"}:
+            clients.append(CoinGeckoClient(config))
+        if source in {None, "exchangerate"}:
+            clients.append(ExchangeRateApiClient(config))
+        updater = RatesUpdater(
+            clients, RatesStorage(self._db), progress_callback=progress_callback
+        )
+        return updater.run_update()
+
+    def show_rates(
+        self,
+        currency: str | None = None,
+        top: int | None = None,
+        base: str | None = None,
+    ) -> RatesTable:
+        """Return current cached pairs for table display without HTTP calls."""
+        return self._rates.show_rates(
+            currency=currency,
+            top=top,
+            base=base or self._settings.get("default_base_currency"),
+        )
 
     @staticmethod
     def _decode_user(record: dict) -> User:

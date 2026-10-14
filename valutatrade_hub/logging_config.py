@@ -26,3 +26,25 @@ def configure_logging() -> logging.Logger:
         handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         logger.addHandler(handler)
     return logger
+
+
+def configure_parser_logging() -> logging.Logger:
+    """Configure a separate size-rotated journal for parser operations."""
+    logger = logging.getLogger("valutatrade.parser")
+    settings = SettingsLoader()
+    logger.setLevel(settings.get("log_level"))
+    logger.propagate = False
+    if not logger.handlers:
+        log_file = settings._absolute(
+            settings.get("parser_log_file", "logs/parser.log")
+        )
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            log_file,
+            maxBytes=settings.get("log_max_bytes"),
+            backupCount=settings.get("log_backup_count"),
+            encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(levelname)s %(asctime)s %(message)s"))
+        logger.addHandler(handler)
+    return logger

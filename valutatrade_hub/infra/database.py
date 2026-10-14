@@ -114,3 +114,16 @@ class DatabaseManager:
     def save_rates(self, records: dict[str, Any]) -> None:
         """Persist cached exchange rates and metadata."""
         self._write("rates_file", records)
+
+    def load_rate_history(self) -> list[dict[str, Any]]:
+        """Return previously recorded parser observations."""
+        records = self._read("exchange_rates_file", [])
+        if not isinstance(records, list) or not all(
+            isinstance(record, dict) for record in records
+        ):
+            raise StorageError("exchange_rates.json должен содержать список записей")
+        return records
+
+    def save_rate_history(self, records: list[dict[str, Any]]) -> None:
+        """Persist parser observations using an atomic file replacement."""
+        self._write("exchange_rates_file", records)

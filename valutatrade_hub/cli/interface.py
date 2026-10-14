@@ -20,7 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """Describe supported commands and their arguments."""
     parser = argparse.ArgumentParser(
         prog="valutatrade",
-        description="Виртуальная торговля валютами (демонстрационные курсы).",
+        description="Виртуальная торговля валютами (реальный локальный кеш).",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -43,10 +43,18 @@ def _build_parser() -> argparse.ArgumentParser:
     rate = commands.add_parser(
         "get-rate",
         help="Показать курс",
-        description="Курс берётся из кеша или демонстрационного сервиса.",
+        description="Курс берётся только из локального кеша Parser Service.",
     )
     rate.add_argument("--from", dest="from_currency", required=True)
     rate.add_argument("--to", dest="to_currency", required=True)
+
+    update = commands.add_parser("update-rates", help="Обновить курсы через API")
+    update.add_argument("--source", choices=("coingecko", "exchangerate"))
+
+    show_rates = commands.add_parser("show-rates", help="Показать кеш курсов")
+    show_rates.add_argument("--currency")
+    show_rates.add_argument("--top", type=int)
+    show_rates.add_argument("--base", default="USD")
     return parser
 
 
@@ -111,7 +119,50 @@ def _execute(args: argparse.Namespace, app: TradingApp) -> None:
             f"Обратный курс {quote.to_currency}→{quote.from_currency}: "
             f"{_format_rate(1 / quote.rate)}"
         )
-        print("Источник: кеш или демонстрационные курсы (не рыночные данные)")
+        print("Источник: локальный кеш Parser Service")
+
+    elif args.command == "update-rates":
+        result = app.update_rates(
+            args.source,
+            progress_callback=lambda level, message: print(f"{level}: {message}"),
+        )
+        if result.partial_failure:
+            print(
+                "Обновление частично завершено. Ошибки: "
+                + ", ".join(result.failed_sources)
+            )
+            print("Подробности: logs/parser.log")
+        else:
+            print("Обновление успешно завершено.")
+        print(f"Обновлено курсов: {result.updated_count}.")
+        print(f"Последнее обновление: {result.last_refresh}")
+
+    elif args.command == "show-rates":
+        if args.top is not None and args.top <= 0:
+            raise UseCaseError("'top' должен быть положительным целым числом")
+        summary = app.show_rates(args.currency, args.top, args.base)
+        if not summary.rows:
+            if args.currency:
+                print(f"Курс для '{args.currency.upper()}' не найден в кеше.")
+            else:
+                print("Локальный кеш курсов пуст. Выполните 'update-rates'.")
+            return
+        print(f"Курсы из кеша (last_refresh: {summary.last_refresh}):")
+        table = PrettyTable()
+        table.field_names = ["Пара", "Курс", "Обновлено (UTC)", "Источник", "Статус"]
+        for row in summary.rows:
+            table.add_row(
+                [
+                    row.pair,
+                    _format_rate(row.rate),
+                    row.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    row.source,
+                    "актуален" if row.is_fresh else "устарел",
+                ]
+            )
+        print(table)
+        if any(not row.is_fresh for row in summary.rows):
+            print("Часть курсов устарела. Выполните 'update-rates'.")
 
 
 def _print_command_error(error: Exception) -> None:
@@ -161,6 +212,8 @@ def main() -> None:
                 "sell",
                 "show-portfolio",
                 "get-rate",
+                "update-rates",
+                "show-rates",
             }
             if name in commands:
                 try:

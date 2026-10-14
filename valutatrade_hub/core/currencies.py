@@ -93,6 +93,7 @@ _FIAT_CURRENCIES: dict[str, tuple[str, str]] = {
 _CRYPTO_CURRENCIES: dict[str, tuple[str, str, float]] = {
     "BTC": ("Bitcoin", "SHA-256", 1.12e12),
     "ETH": ("Ether", "Keccak-256", 3.00e11),
+    "SOL": ("Solana", "Proof of History", 7.00e10),
 }
 
 

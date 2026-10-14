@@ -1,60 +1,78 @@
-# ValutaTrade Hub: CLI implementation (section 2.2)
+# ValutaTrade Hub
 
-Copy the six new Python files from the `valutatrade_hub/` folder into the
-identically named directories in your existing project. Your existing
-`valutatrade_hub/core/models.py` is deliberately **not** included or changed.
+ValutaTrade Hub — консольное приложение на Python для отслеживания курсов фиатных и криптовалют и симуляции торговли в виртуальном портфеле.
 
-## Prerequisites
+Приложение получает цены криптовалют через **CoinGecko**, а курсы фиатных валют — через **ExchangeRate-API**. Курсы кешируются локально в JSON-файлах, поэтому для каждой операции с портфелем не требуется новый запрос к API.
 
-The existing project must contain the `User`, `Wallet`, `Portfolio` classes
-from the previous stage. `core/usecases.py` uses the internal helper functions
-`_validate_currency_code` and `_validate_number` from that version.
+## Возможности
 
-Make sure `pyproject.toml` includes:
+- Регистрация пользователей и вход в систему
+- Виртуальные кошельки для USD, EUR, GBP, RUB, BTC, ETH и SOL
+- Покупка и продажа виртуальных единиц валют
+- Оценка стоимости портфеля в выбранной базовой валюте
+- Ручное обновление курсов, фильтрация кеша и получение обменных курсов
+- История курсов, обработка ошибок и ротация логов
 
-```toml
-[project.scripts]
-valutatrade = "valutatrade_hub.cli.interface:main"
-```
+## Установка и запуск
 
-and that `prettytable` is a runtime dependency (`uv add prettytable`).
-
-Initialize data files (or leave existing JSON files intact):
-
-- `data/users.json`: `[]`
-- `data/portfolios.json`: `[]`
-- `data/rates.json`: `{}`
-
-Run from project root:
+Требуются **Python 3.12+** и [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-uv run ruff format .
-uv run ruff check .
-uv run ruff format --check .
-uv run valutatrade
 ```
 
-Example commands inside the **same interactive CLI process**:
+Создайте файл `.env` в корне проекта:
+
+```dotenv
+COINGECKO_API_KEY=ваш_ключ_coingecko
+EXCHANGERATE_API_KEY=ваш_ключ_exchangerate
+```
+
+Получить ключи можно на сайтах [CoinGecko](https://www.coingecko.com/en/api) и [ExchangeRate-API](https://www.exchangerate-api.com/). Не добавляйте файл `.env` в Git.
+
+Запустите приложение:
+
+```bash
+uv run --env-file .env valutatrade
+```
+
+## Пример работы с CLI
 
 ```text
+update-rates
+show-rates --top 2
 register --username alice --password 1234
 login --username alice --password 1234
 buy --currency BTC --amount 0.05
 show-portfolio --base USD
 sell --currency BTC --amount 0.01
-get-rate --from USD --to BTC
+get-rate --from BTC --to USD
+show-rates --currency EUR
 exit
 ```
 
-## Known scope limitations
+Для просмотра доступных команд введите `help`.
 
-- According to section 2.2, a simulated `buy` credits the purchased currency
-  without deducting USD, and `sell` deducts holdings without crediting USD.
-  Thus the displayed cash consideration is indicative, not settled.
-- Rates are static demonstration values, not live market data.
-- Authenticated session persists **only during the current CLI process**.
-- Password hashing uses salted SHA-256 as required by the educational brief;
-  use a dedicated slow password-hashing algorithm in real applications.
-- The storage layer writes individual JSON files atomically, but transactions
-  across users.json and portfolios.json are not atomic.
+## Структура проекта
+
+- `valutatrade_hub/core/` — модели данных и торговые операции
+- `valutatrade_hub/cli/` — командный интерфейс
+- `valutatrade_hub/parser_service/` — API-клиенты, обновление курсов и управление кешем
+- `valutatrade_hub/infra/` — конфигурация и хранение данных в JSON
+- `data/` — данные пользователей и портфелей, кеш и история курсов
+
+Время актуальности кеша настраивается (по умолчанию — 300 секунд). Если курсы отсутствуют или устарели, выполните `update-rates`. Курсы можно обновлять сразу из обоих источников или из выбранного.
+
+## Разработка
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run python -m unittest discover -s tests -v
+```
+
+## Демонстрация
+
+[![asciicast](https://asciinema.org/a/A6e4FORzNMdTyNqu.svg)](https://asciinema.org/a/A6e4FORzNMdTyNqu)
+
+> **Учебный проект.** Сделки изменяют только виртуальные балансы: при покупке USD не списываются, а при продаже не начисляются. Приложение не совершает реальных финансовых операций.
